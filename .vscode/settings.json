@@ -1,27 +1,10 @@
 {
-  "idf.adapterTargetName": "esp32h2",
-  "idf.portWin": "COM4",
+  "idf.adapterTargetName": "esp32c6",
   "idf.openOcdConfigs": ["board/esp32h2-ftdi.cfg"],
-  "idf.flashType": "UART",
+  "idf.flashType": "JTAG",
+  "idf.portWin": "COM13",
   "files.associations": {
     "*.vhd": "vhdl",
-    "*.yaml": "home-assistant",
-    "gpio.h": "c",
-    "esp_zigbee_ha_standard.h": "c",
-    "esp_zigbee_core.h": "c",
-    "esp_zigbee_zcl_command.h": "c",
-    "esp_zigbee_zdo_command.h": "c",
-    "esp_zigbee_type.h": "c",
-    "zb_ha_device_config.h": "c",
-    "esp_zb_light.h": "c"
-  },
-  "idf.espIdfPath": "/home/dorian/esp/esp-idf",
-  "idf.pythonBinPath": "/home/dorian/.espressif/python_env/idf5.2_py3.10_env/bin/python",
-  "idf.toolsPath": "/home/dorian/.espressif",
-  "idf.customExtraPaths": "/home/dorian/.espressif/tools/xtensa-esp-elf-gdb/12.1_20221002/xtensa-esp-elf-gdb/bin:/home/dorian/.espressif/tools/riscv32-esp-elf-gdb/12.1_20221002/riscv32-esp-elf-gdb/bin:/home/dorian/.espressif/tools/xtensa-esp32-elf/esp-12.2.0_20230208/xtensa-esp32-elf/bin:/home/dorian/.espressif/tools/xtensa-esp32s2-elf/esp-12.2.0_20230208/xtensa-esp32s2-elf/bin:/home/dorian/.espressif/tools/xtensa-esp32s3-elf/esp-12.2.0_20230208/xtensa-esp32s3-elf/bin:/home/dorian/.espressif/tools/riscv32-esp-elf/esp-12.2.0_20230208/riscv32-esp-elf/bin:/home/dorian/.espressif/tools/esp32ulp-elf/2.35_20220830/esp32ulp-elf/bin:/home/dorian/.espressif/tools/openocd-esp32/v0.12.0-esp32-20230419/openocd-esp32/bin:/home/dorian/.espressif/tools/esp-rom-elfs/20230320",
-  "idf.customExtraVars": {
-    "OPENOCD_SCRIPTS": "/home/dorian/.espressif/tools/openocd-esp32/v0.12.0-esp32-20230419/openocd-esp32/share/openocd/scripts",
-    "ESP_ROM_ELF_DIR": "/home/dorian/.espressif/tools/esp-rom-elfs/20230320/"
-  },
-  "idf.gitPath": "/usr/bin/git"
+    "random": "c"
+  }
 }

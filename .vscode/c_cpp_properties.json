@@ -16,7 +16,7 @@
                 "limitSymbolsToIncludedHeaders": false
             },
             "compileCommands": "${workspaceFolder}/build/compile_commands.json",
-            "compilerPath": "c:\\Espressif\\IDF_TOOLS_PATH\\tools\\riscv32-esp-elf\\esp-12.2.0_20230208\\riscv32-esp-elf\\bin\\riscv32-esp-elf-gcc.exe"
+            "compilerPath": "c:\\Espressif\\5.2\\IDF_TOOLS_PATH\\tools\\riscv32-esp-elf\\esp-12.2.0_20230208\\riscv32-esp-elf\\bin\\riscv32-esp-elf-gcc.exe"
         }
     ],
     "version": 4
