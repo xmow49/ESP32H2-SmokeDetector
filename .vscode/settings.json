@@ -1,10 +1,13 @@
 {
-  "idf.adapterTargetName": "esp32c6",
+  "idf.adapterTargetName": "esp32h2",
   "idf.openOcdConfigs": ["board/esp32h2-ftdi.cfg"],
-  "idf.flashType": "JTAG",
-  "idf.portWin": "COM13",
+  "idf.flashType": "UART",
+  "idf.portWin": "COM17",
   "files.associations": {
     "*.vhd": "vhdl",
-    "random": "c"
+    "random": "c",
+    "zigbee.h": "c",
+    "smoke_detector.h": "c",
+    "queue.h": "c"
   }
 }

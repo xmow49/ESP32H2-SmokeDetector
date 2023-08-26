@@ -4,20 +4,92 @@
 #include "ha/esp_zigbee_ha_standard.h"
 #include "ha/zb_ha_device_config.h"
 #include "zcl/esp_zigbee_zcl_power_config.h"
-
-#include "smoke_detector.h"
+#include "freertos/queue.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "esp_sleep.h"
-
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include <string.h>
 // 37uA
+#include "smoke_detector.h"
+#include "zigbee.h"
 
-#define DEBUG_SLEEP
-
-#define MILLIS xTaskGetTickCount() * portTICK_PERIOD_MS
-static const char *TAG = "ESP_ZB_ON_OFF_LIGHT";
+#define TAG "MAIN"
 
 /********************* Define functions **************************/
+RTC_DATA_ATTR uint8_t lastBatteryPercentageRemaining = 0x8C;
+
+void updateBattery(void)
+{
+    // gpio 4
+    esp_log_level_set("gpio", ESP_LOG_ERROR);
+    adc_oneshot_unit_init_cfg_t init_config1 = {};
+    adc_oneshot_unit_handle_t adc1_handle;
+    init_config1.unit_id = ADC_UNIT_1;
+
+    adc_oneshot_chan_cfg_t config = {
+        .atten = ADC_ATTEN_DB_11,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    int raw = 0;
+    uint8_t max = 0;
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_3, &config));
+    do
+    {
+        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_3, &raw));
+    } while ((raw == 0) && max++ < 10);
+    adc_oneshot_del_unit(adc1_handle);
+
+    int tempCal = raw - ADC_RAW_OFFSET;
+    // max 1.8 4081
+    // 1M / 11M
+    // 0 -> 0v
+    // 1793 --> 1.8V
+    // float vADC = (float)tempCal * 1.8 / (4081 - OFFSET);
+    // float vIN = (vADC * 11) + 1; //+1 calibration
+
+#ifdef DEBUG_SLEEP
+    ESP_LOGI(TAG, "Battery Raw: %d, TempCal: %d", raw, tempCal);
+#endif
+
+    float vIN = (ADC_EQUATION_COEF * tempCal) + ADC_EQUATION_OFFSET;
+    // ESP_LOGI(TAG, "Battery Raw: %d, TempCal: %d, vIN: %f", raw, tempCal, vIN);
+    // ------- percentage ----------
+    // 0% 7v
+    // 100% 9.5V
+
+    uint8_t percentage = 0;
+    if (vIN < 7)
+    {
+        percentage = 0;
+    }
+    else if (vIN > 9.5)
+    {
+        percentage = 100;
+    }
+    else
+    {
+        percentage = (uint8_t)((vIN - 7) * 100 / 2.5);
+    }
+    ESP_LOGI(TAG, "vIN: %f, percentage: %d", vIN, percentage);
+    percentage = percentage * 2; // zigbee scale
+    lastBatteryPercentageRemaining = percentage;
+    reportAttribute(HA_ESP_SMOKE_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, &percentage, 1);
+    return;
+}
+
+void debugLoop(void *arg)
+{
+    while (1)
+    {
+        updateBattery();
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+}
+
 void sendSmoke(uint8_t smoke)
 {
 
@@ -33,6 +105,7 @@ void sendSmoke(uint8_t smoke)
         .delay = 0,
     };
     esp_zb_zcl_ias_zone_status_change_notif_cmd_req(&cmd);
+    updateBattery();
 }
 
 void setup_sleep(time_t time_s, uint8_t gpio_en)
@@ -42,7 +115,7 @@ void setup_sleep(time_t time_s, uint8_t gpio_en)
     if (gpio_en)
     {
         ESP_LOGI(TAG, "Enabling timer wakeup, %llds and GPIO wake", time_s);
-        esp_sleep_enable_ext1_wakeup_with_level_mask((1ULL << GPIO_NUM_8), (1ULL << GPIO_NUM_8));
+        esp_sleep_enable_ext1_wakeup_with_level_mask((1ULL << SMOKE_PIN), (1ULL << SMOKE_PIN));
     }
     else
     {
@@ -71,7 +144,7 @@ void smoke_detector_main(void *arg)
                 ESP_LOGI(TAG, "Alert already sent!");
             }
             // recheck after 30s without gpio
-            setup_sleep(30, 0);
+            setup_sleep(TIME_SMOKE_CHECK, 0);
             break;
         case ESP_SLEEP_WAKEUP_TIMER:
         {
@@ -81,183 +154,38 @@ void smoke_detector_main(void *arg)
                 // check any HIGH signal from GPIO8 with a timeout of 1s
                 for (int i = 0; i < 200; i++)
                 {
-                    ESP_LOGI(TAG, "GPIO8: %d", gpio_get_level(GPIO_NUM_8));
-                    if (gpio_get_level(GPIO_NUM_8))
+                    if (gpio_get_level(SMOKE_PIN))
                     {
                         ESP_LOGI(TAG, "Smoke Still detected!");
-                        setup_sleep(30, 0);
+                        setup_sleep(TIME_SMOKE_CHECK, 0);
                         esp_deep_sleep_start();
                         break;
                     }
-                    vTaskDelay(10 / portTICK_PERIOD_MS);
+                    vTaskDelay(1 / portTICK_PERIOD_MS);
                 }
                 ESP_LOGI(TAG, "Reset state");
                 state = 0;
                 sendSmoke(state);
             }
             // 1h sleep
-            setup_sleep(3600, 1);
+            setup_sleep(TIME_BATTERY_UPDATE, 1);
             break;
         }
         default:
         {
-            ESP_LOGI(TAG, "Wake up reason: %d", wakeup_reason);
-            setup_sleep(3600, 1);
+            uint64_t pin = esp_sleep_get_ext1_wakeup_status();
+            ESP_LOGI(TAG, "Wake up reason: %d, pin: %lld", wakeup_reason, pin);
+            updateBattery();
+            sendSmoke(0);
+            setup_sleep(TIME_BATTERY_UPDATE, 1);
             break;
         }
         }
 #ifndef DEBUG_SLEEP
-        vTaskDelay(3000 / portTICK_PERIOD_MS);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
         esp_deep_sleep_start();
 #endif
     }
-}
-
-static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
-{
-    ESP_ERROR_CHECK(esp_zb_bdb_start_top_level_commissioning(mode_mask));
-}
-
-void attr_cb(uint8_t status, uint8_t endpoint, uint16_t cluster_id, uint16_t attr_id, void *new_value)
-{
-    ESP_LOGI(TAG, "cluster:0x%x, attribute:0x%x changed ", cluster_id, attr_id);
-}
-
-void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
-{
-    uint32_t *p_sg_p = signal_struct->p_app_signal;
-    esp_err_t err_status = signal_struct->esp_err_status;
-
-    esp_zb_app_signal_type_t sig_type = *p_sg_p;
-    switch (sig_type)
-    {
-    case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
-        ESP_LOGI(TAG, "Zigbee stack initialized");
-        esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_INITIALIZATION);
-        break;
-    case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
-    case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
-        ESP_LOGI(TAG, "signal: %d, status: %d", sig_type, err_status);
-        if (err_status == ESP_OK)
-        {
-            ESP_LOGI(TAG, "Start network steering");
-            esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
-        }
-        else
-        {
-            /* commissioning failed */
-            ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %d)", err_status);
-#ifndef DEBUG_SLEEP
-            setup_sleep(10, 0); // reset after 10s
-            esp_deep_sleep_start();
-#endif
-        }
-        break;
-
-    case ESP_ZB_BDB_SIGNAL_STEERING:
-        if (err_status == ESP_OK)
-        {
-            esp_zb_ieee_addr_t extended_pan_id;
-            esp_zb_get_extended_pan_id(extended_pan_id);
-            ESP_LOGI(TAG, "Joined network successfully (Extended PAN ID: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x, PAN ID: 0x%04hx, Channel:%d)",
-                     extended_pan_id[7], extended_pan_id[6], extended_pan_id[5], extended_pan_id[4],
-                     extended_pan_id[3], extended_pan_id[2], extended_pan_id[1], extended_pan_id[0],
-                     esp_zb_get_pan_id(), esp_zb_get_current_channel());
-#ifndef DEBUG_SLEEP
-            xTaskCreate(smoke_detector_main, "smoke_detector_main", 4096, NULL, 5, NULL);
-#endif
-        }
-        else
-        {
-            ESP_LOGI(TAG, "Network steering was not successful (status: %d)", err_status);
-            esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
-        }
-        break;
-    default:
-        ESP_LOGI(TAG, "ZDO signal: %d, status: %d", sig_type, err_status);
-        break;
-    }
-}
-
-static void esp_zb_task(void *pvParameters)
-{
-
-    /* initialize Zigbee stack with Zigbee end-device config */
-    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
-    esp_zb_init(&zb_nwk_cfg);
-    //------------------------------------------ Attribute ------------------------------------------------
-    //***********************BASIC CLUSTER***************************
-    /* basic cluster create with fully customized */
-    esp_zb_basic_cluster_cfg_t basic_cluster_cfg = {
-        .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
-        .power_source = 0x03,
-    };
-    uint32_t ApplicationVersion = 0x0001;
-    uint32_t StackVersion = 0x0002;
-    uint32_t HWVersion = 0x0002;
-    uint8_t ManufacturerName[] = {14, 'G', 'a', 'm', 'm', 'a', 'T', 'r', 'o', 'n', 'i', 'q', 'u', 'e', 's'};
-    uint8_t ModelIdentifier[] = {14, 'S', 'm', 'o', 'k', 'e', ' ', 'D', 'e', 't', 'e', 'c', 't', 'o', 'r'};
-    uint8_t DateCode[] = {8, '2', '0', '2', '3', '0', '5', '2', '4'};
-    uint32_t SWBuildID = 0x01;
-    esp_zb_attribute_list_t *esp_zb_basic_cluster = esp_zb_basic_cluster_create(&basic_cluster_cfg);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_APPLICATION_VERSION_ID, &ApplicationVersion);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_STACK_VERSION_ID, &StackVersion);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_HW_VERSION_ID, &HWVersion);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, ManufacturerName);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, ModelIdentifier);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_DATE_CODE_ID, DateCode);
-    esp_zb_basic_cluster_add_attr(esp_zb_basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_SW_BUILD_ID, &SWBuildID);
-
-    //***********************SMOKE CLUSTER***************************
-    esp_zb_ias_zone_cluster_cfg_t smoke_cfg = {
-        .zone_state = ESP_ZB_ZCL_IAS_ZONE_ZONESTATE_NOT_ENROLLED,
-        .zone_type = ESP_ZB_ZCL_IAS_ZONE_ZONETYPE_FIRE_SENSOR,
-        .zone_status = 0,
-        .ias_cie_addr = ESP_ZB_ZCL_ZONE_IAS_CIE_ADDR_DEFAULT,
-        .zone_id = 0,
-    };
-    esp_zb_attribute_list_t *esp_zb_smoke_cluster = esp_zb_ias_zone_cluster_create(&smoke_cfg);
-
-    //***********************BATTEY CLUSTER***************************
-    esp_zb_power_config_cluster_cfg_t power_cfg = {0};
-    uint8_t batteryVoltage = 90;
-    uint8_t batteryRatedVoltage = 90;
-    uint8_t batteryMinVoltage = 70;
-    uint8_t batteryPercentageRemaining = 0x64;
-    uint8_t batteryQuantity = 1;
-    uint8_t batterySize = 0x02;
-    uint16_t batteryAhrRating = 50000;
-    uint8_t batteryAlarmMask = 0;
-    esp_zb_attribute_list_t *esp_zb_power_cluster = esp_zb_power_config_cluster_create(&power_cfg);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, &batteryVoltage);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_SIZE_ID, &batterySize);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_QUANTITY_ID, &batteryQuantity);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_RATED_VOLTAGE_ID, &batteryRatedVoltage);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_ALARM_MASK_ID, &batteryAlarmMask);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_MIN_THRESHOLD_ID, &batteryMinVoltage);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_A_HR_RATING_ID, &batteryAhrRating);
-    esp_zb_power_config_cluster_add_attr(esp_zb_power_cluster, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, &batteryPercentageRemaining);
-
-    //------------------------------------------ Cluster ------------------------------------------------
-
-    /* create cluster lists for this endpoint */
-    esp_zb_cluster_list_t *esp_zb_cluster_list = esp_zb_zcl_cluster_list_create();
-    esp_zb_cluster_list_add_basic_cluster(esp_zb_cluster_list, esp_zb_basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_cluster_list_add_power_config_cluster(esp_zb_cluster_list, esp_zb_power_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_cluster_list_add_ias_zone_cluster(esp_zb_cluster_list, esp_zb_smoke_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-
-    //------------------------------------------ Endpoint ------------------------------------------------
-    esp_zb_ep_list_t *esp_zb_ep_list = esp_zb_ep_list_create();
-    esp_zb_ep_list_add_ep(esp_zb_ep_list, esp_zb_cluster_list, HA_ESP_SMOKE_ENDPOINT, ESP_ZB_AF_HA_PROFILE_ID, ESP_ZB_HA_ON_OFF_OUTPUT_DEVICE_ID);
-    esp_zb_device_register(esp_zb_ep_list);
-
-    //------------------------------------------ Callback ------------------------------------------------
-    esp_zb_device_add_set_attr_value_cb(attr_cb);
-
-    esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
-    esp_zb_set_secondary_network_channel_set(0x07FFF800);
-    ESP_ERROR_CHECK(esp_zb_start(false));
-    esp_zb_main_loop_iteration();
 }
 
 void sleep_watchdog(void *arg)
@@ -267,17 +195,27 @@ void sleep_watchdog(void *arg)
         if (MILLIS > 5000)
         {
             ESP_LOGI(TAG, "Sleep watchdog timeout");
-            setup_sleep(10, 0); // force sleep
+            setup_sleep(TIME_SMOKE_CHECK, 0); // force sleep
             esp_deep_sleep_start();
         }
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
-
 void app_main(void)
 {
+    // set gpio 4 as input
+    gpio_config_t io_conf;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << GPIO_NUM_4); // ADC1_CHANNEL_3 --> VIN
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    gpio_config(&io_conf);
+
 #ifndef DEBUG_SLEEP
     xTaskCreate(sleep_watchdog, "sleep_watchdog", 4096, NULL, 5, NULL);
 #endif
+
     esp_zb_platform_config_t config = {
         .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
