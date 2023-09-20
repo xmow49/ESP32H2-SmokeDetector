@@ -1,7 +1,7 @@
 #ifndef SMOKE_DETECTOR_H
 #define SMOKE_DETECTOR_H
 
-// #define DEBUG_SLEEP
+#define DEBUG_SLEEP
 
 #define SMOKE_PIN GPIO_NUM_12
 #define TIME_BATTERY_UPDATE 21600 // 6h

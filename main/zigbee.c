@@ -1,6 +1,6 @@
 #include "zigbee.h"
 #include "smoke_detector.h"
-
+#include "esp_check.h"
 #define TAG "ZIGBEE"
 
 void reportAttribute(uint8_t endpoint, uint16_t clusterID, uint16_t attributeID, void *value, uint8_t value_length)
@@ -155,17 +155,39 @@ void esp_zb_task(void *pvParameters)
     esp_zb_device_register(esp_zb_ep_list);
 
     //------------------------------------------ Callback ------------------------------------------------
-    esp_zb_device_add_set_attr_value_cb(attr_cb);
+    esp_zb_core_action_handler_register(zb_action_handler);
 
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     esp_zb_set_secondary_network_channel_set(0x07FFF800);
+    esp_zb_set_rx_on_when_idle(false); // temporary fix: set the node descriptor to battery powered device
     ESP_ERROR_CHECK(esp_zb_start(false));
     esp_zb_main_loop_iteration();
 }
 
-void attr_cb(uint8_t status, uint8_t endpoint, uint16_t cluster_id, uint16_t attr_id, void *new_value)
+static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message)
 {
-    ESP_LOGI(TAG, "cluster:0x%x, attribute:0x%x changed ", cluster_id, attr_id);
+    esp_err_t ret = ESP_OK;
+    ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty message");
+    ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG, "Received message: error status(%d)",
+                        message->info.status);
+    ESP_LOGI(TAG, "Received message: endpoint(0x%x), cluster(0x%x), attribute(0x%x), data size(%d)", message->info.dst_endpoint, message->info.cluster,
+             message->attribute.id, message->attribute.data.size);
+    return ret;
+}
+
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
+{
+    esp_err_t ret = ESP_OK;
+    switch (callback_id)
+    {
+    case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
+        ret = zb_attribute_handler((esp_zb_zcl_set_attr_value_message_t *)message);
+        break;
+    default:
+        ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback", callback_id);
+        break;
+    }
+    return ret;
 }
 
 void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)

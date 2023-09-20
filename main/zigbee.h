@@ -43,7 +43,8 @@
 void reportAttribute(uint8_t endpoint, uint16_t clusterID, uint16_t attributeID, void *value, uint8_t value_length);
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct);
 void esp_zb_task(void *pvParameters);
-void attr_cb(uint8_t status, uint8_t endpoint, uint16_t cluster_id, uint16_t attr_id, void *new_value);
+static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message);
 void bdb_start_top_level_commissioning_cb(uint8_t mode_mask);
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message);
 
 #endif
